@@ -1,28 +1,40 @@
-import psycopg2
-import os
-from dotenv import load_dotenv
-import json
-from genai import generate_content
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import google.generativeai as genai
+import psycopg2 # Library for connecting to PostgreSQL database
+import os # For interacting with the operating system (e.g., environment variables)
+from dotenv import load_dotenv # To load environment variables from a .env file
+import json # For working with JSON data
+# from genai import generate_content # This import seems redundant as generate_content is defined locally below
+import smtplib # For sending emails using SMTP protocol
+from email.mime.multipart import MIMEMultipart # For creating multipart email messages (e.g., HTML content)
+from email.mime.text import MIMEText # For creating text parts of email messages
+import google.generativeai as genai # Google's library for interacting with Gemini AI
 
+# Load environment variables from the .env file located in the parent directory
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 def get_db_connection():
+    """
+    Establishes and returns a connection to the PostgreSQL database
+    using credentials loaded from environment variables.
+    """
     connection = psycopg2.connect(
         dbname=os.getenv('PSQL_DB_NAME'),
         user=os.getenv('PSQL_DB_USER'),
         password=os.getenv('PSQL_DB_PASSWORD'),
         host=os.getenv('PSQL_DB_HOST'),
-        port=5432
+        port=5432 # Default PostgreSQL port
     )
     return connection
 
 def generate_content(html_body):
-    api_key = os.getenv('GENAI_API_KEY')
+    """
+    Generates music recap insights and recommendations using Google's Gemini AI.
+    It takes an HTML body containing music data, sends it to the AI,
+    and returns the AI's JSON response.
+    """
+    api_key = os.getenv('GENAI_API_KEY') # Get Gemini API key from environment variables
 
+    # Define the system instruction for the Gemini AI model
+    # This guides the AI on its role, expected output format, and tone.
     system_instruction = """
     You are an expert music and/or song analyst.
     Given an html body, I need you to generate a weekly recap summary, mood recap, and recommendations. 
@@ -39,167 +51,182 @@ def generate_content(html_body):
     }
     """
 
+    # Configure the Gemini AI library with the API key
     genai.configure(api_key=api_key)
+    # Initialize the GenerativeModel with the specified model name and system instruction
     model = genai.GenerativeModel(
         model_name='gemini-1.5-pro-latest',
         system_instruction=system_instruction
     )
     try:
+        # Generate content using the AI model based on the provided HTML body
         response = model.generate_content(html_body)
         response_text = response.text
+        # Clean up potential markdown formatting from the AI response
         if '```json' in response_text:
             response_text = response_text.replace('```json', '')
         if '```' in response_text:
             response_text = response_text.replace('```', '')
-        print(response_text)
-        return response_text
+        print(response_text) # Print raw AI response for debugging/logging
+        return response_text # Return the cleaned JSON string
     except Exception as e:
-        print("error: ", e)
-        return {"error": str(e)}
+        print("error: ", e) # Log any errors during AI content generation
+        return {"error": str(e)} # Return an error dictionary
 
 def get_insight():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    """
+    Orchestrates the process of fetching music listening data from PostgreSQL,
+    generating an HTML report, sending it to Gemini AI for analysis,
+    and then sending the final AI-generated insight via email.
+    """
+    conn = get_db_connection() # Get a database connection
+    cursor = conn.cursor() # Create a cursor object to execute SQL queries
 
+    # Define a list of SQL queries to fetch different types of listening data
     queries = [
         {
-            'name': 'Top 10 Songs', 'query': """
-                SELECT 
-                    ds.title AS song_name,
-                    da.title AS album,
-                    dar.name AS artist,
-                    da.image_url AS album_art,
-                    FLOOR(SUM(ds.duration_ms) / (1000 * 60)) AS total_minute_listened
-                FROM 
-                    fact_history fh
-                JOIN 
-                    dim_song ds ON fh.song_id = ds.song_id
-                JOIN 
-                    dim_album da ON fh.album_id = da.album_id
-                JOIN 
-                    dim_artist dar ON fh.artist_id = dar.artist_id
-                WHERE 
-                    fh.played_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 1 DAY) + INTERVAL '00:01:00' HOUR_SECOND
-                    AND fh.played_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) - 5 DAY), INTERVAL '08:59:00' HOUR_SECOND)
-                GROUP BY 
-                    ds.title, da.title, dar.name, da.image_url
-                ORDER BY 
-                    total_minute_listened DESC
-                LIMIT 10;
+            'name': 'Top 10 Songs', 'query': """ 
+                SELECT  
+                    ds.title AS song_name, 
+                    da.title AS album, 
+                    dar.name AS artist, 
+                    da.image_url AS album_art, 
+                    FLOOR(SUM(ds.duration_ms) / (1000 * 60)) AS total_minute_listened 
+                FROM  
+                    fact_history fh 
+                JOIN  
+                    dim_song ds ON fh.song_id = ds.song_id 
+                JOIN  
+                    dim_album da ON fh.album_id = da.album_id 
+                JOIN  
+                    dim_artist dar ON fh.artist_id = dar.artist_id 
+                WHERE  
+                    fh.played_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 1 DAY) + INTERVAL '00:01:00' HOUR_SECOND 
+                    AND fh.played_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) - 5 DAY), INTERVAL '08:59:00' HOUR_SECOND) 
+                GROUP BY  
+                    ds.title, da.title, dar.name, da.image_url 
+                ORDER BY  
+                    total_minute_listened DESC 
+                LIMIT 10; 
             """
         },
         {
-            'name': 'Top 5 Albums', 'query': """
-                SELECT 
-                    da.title AS album,
-                    dar.name AS artist,
-                    da.image_url AS album_art,
-                    FLOOR(SUM(ds.duration_ms) / (1000 * 60)) AS total_minute_listened
-                FROM 
-                    fact_history fh
-                JOIN 
-                    dim_album da ON fh.album_id = da.album_id
-                JOIN 
-                    dim_artist dar ON fh.artist_id = dar.artist_id
-                JOIN 
-                    dim_song ds ON fh.song_id = ds.song_id
-                WHERE 
-                    fh.played_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 1 DAY) + INTERVAL '00:01:00' HOUR_SECOND
-                    AND fh.played_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) - 5 DAY), INTERVAL '08:59:00' HOUR_SECOND)
-                GROUP BY 
-                    da.title, dar.name, da.image_url
-                ORDER BY 
-                    total_minute_listened DESC
-                LIMIT 5;
+            'name': 'Top 5 Albums', 'query': """ 
+                SELECT  
+                    da.title AS album, 
+                    dar.name AS artist, 
+                    da.image_url AS album_art, 
+                    FLOOR(SUM(ds.duration_ms) / (1000 * 60)) AS total_minute_listened 
+                FROM  
+                    fact_history fh 
+                JOIN  
+                    dim_album da ON fh.album_id = da.album_id 
+                JOIN  
+                    dim_artist dar ON fh.artist_id = dar.artist_id 
+                JOIN  
+                    dim_song ds ON fh.song_id = ds.song_id 
+                WHERE  
+                    fh.played_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 1 DAY) + INTERVAL '00:01:00' HOUR_SECOND 
+                    AND fh.played_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) - 5 DAY), INTERVAL '08:59:00' HOUR_SECOND) 
+                GROUP BY  
+                    da.title, dar.name, da.image_url 
+                ORDER BY  
+                    total_minute_listened DESC 
+                LIMIT 5; 
             """
         },
         {
-            'name': 'Top 5 Artists', 'query': """
-                SELECT 
-                    dar.name AS artist,
-                    FLOOR(SUM(ds.duration_ms) / (1000 * 60)) AS total_minute_listened
-                FROM 
-                    fact_history fh
-                JOIN 
-                    dim_artist dar ON fh.artist_id = dar.artist_id
-                JOIN 
-                    dim_song ds ON fh.song_id = ds.song_id
-                WHERE 
-                    fh.played_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 1 DAY) + INTERVAL '00:01:00' HOUR_SECOND
-                    AND fh.played_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) - 5 DAY), INTERVAL '08:59:00' HOUR_SECOND)
-                GROUP BY 
-                    dar.name
-                ORDER BY 
-                    total_minute_listened DESC
-                LIMIT 5;
+            'name': 'Top 5 Artists', 'query': """ 
+                SELECT  
+                    dar.name AS artist, 
+                    FLOOR(SUM(ds.duration_ms) / (1000 * 60)) AS total_minute_listened 
+                FROM  
+                    fact_history fh 
+                JOIN  
+                    dim_artist dar ON fh.artist_id = dar.artist_id 
+                JOIN  
+                    dim_song ds ON fh.song_id = ds.song_id 
+                WHERE  
+                    fh.played_at >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 1 DAY) + INTERVAL '00:01:00' HOUR_SECOND 
+                    AND fh.played_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) - 5 DAY), INTERVAL '08:59:00' HOUR_SECOND) 
+                GROUP BY  
+                    dar.name 
+                ORDER BY  
+                    total_minute_listened DESC 
+                LIMIT 5; 
             """
         },
         {
-            'name': 'Songs you haven\'t listened to in a while', 'query': """
-            SELECT 
-                ds.title AS song_name,
-                da.image_url AS album_art,
-                MAX(fh.played_at) AS last_played,
-                DATEDIFF(NOW(), MAX(fh.played_at)) AS days_ago
-            FROM 
-                fact_history fh
-            JOIN 
-                dim_song ds ON fh.song_id = ds.song_id
-            JOIN 
-                dim_album da ON fh.album_id = da.album_id
-            GROUP BY 
-                ds.title, da.image_url
-            ORDER BY 
-                days_ago DESC
-            LIMIT 10;
+            'name': 'Songs you haven\'t listened to in a while', 'query': """ 
+            SELECT  
+                ds.title AS song_name, 
+                da.image_url AS album_art, 
+                MAX(fh.played_at) AS last_played, 
+                DATEDIFF(NOW(), MAX(fh.played_at)) AS days_ago 
+            FROM  
+                fact_history fh 
+            JOIN  
+                dim_song ds ON fh.song_id = ds.song_id 
+            JOIN  
+                dim_album da ON fh.album_id = da.album_id 
+            GROUP BY  
+                ds.title, da.image_url 
+            ORDER BY  
+                days_ago DESC 
+            LIMIT 10; 
             """
         }
     ]
 
+    # Execute each query and store results
     for query in queries:
         cursor.execute(query['query'])
         results = cursor.fetchall()
         data = []
         for row in results:
             data.append(row)
-        query['data'] = data
+        query['data'] = data # Attach fetched data to the query dictionary
 
+    # Build the HTML body dynamically from query results to send to Gemini AI
     body = ""
-
     for query in queries:
         if query['data']:
             body += f"<h3>{query['name']}</h3>"
             body += "<div class='card-container'>"
             for row in query['data']:
+                # Generate HTML cards based on the type of query/data
                 if query['name'] == 'Top 10 Songs':
-                    body += f"<div class='album-card' style='background-image: url({row['album_art']});'>"
-                    body += f"<div class='album-content'><div class='title'>{row['song_name']}</div>"
-                    body += f"<div class='subtitle'>by {row['artist']}</div><p>{row['total_minute_listened']}m listened</p></div>"
+                    body += f"<div class='album-card' style='background-image: url({row[3]});'>" # album_art is row[3]
+                    body += f"<div class='album-content'><div class='title'>{row[0]}</div>" # song_name is row[0]
+                    body += f"<div class='subtitle'>by {row[2]}</div><p>{row[4]}m listened</p></div>" # artist is row[2], total_minute_listened is row[4]
                 elif query['name'] == 'Top 5 Albums':
-                    body += f"<div class='album-card' style='background-image: url({row['album_art']});'>"
-                    body += f"<div class='album-content'><div class='title'>{row['album']}</div>"
-                    body += f"<div class='subtitle'>by {row['artist']}</div><p>{row['total_minute_listened']}m listened</p></div>"
+                    body += f"<div class='album-card' style='background-image: url({row[2]});'>" # album_art is row[2]
+                    body += f"<div class='album-content'><div class='title'>{row[0]}</div>" # album title is row[0]
+                    body += f"<div class='subtitle'>by {row[1]}</div><p>{row[3]}m listened</p></div>" # artist is row[1], total_minute_listened is row[3]
                 elif query['name'] == 'Top 5 Artists':
                     body += "<div class='card'>"
-                    body += f"<div class='artist-title'>{row['artist']}</div>"
-                    body += f"<p>{row['total_minute_listened']}m listened</p>"
+                    body += f"<div class='artist-title'>{row[0]}</div>" # artist name is row[0]
+                    body += f"<p>{row[1]}m listened</p>" # total_minute_listened is row[1]
                 elif query['name'] == 'Songs you haven\'t listened to in a while':
-                    body += f"<div class='album-card' style='background-image: url({row['album_art']});'>"
-                    body += f"<div class='album-content'><div class='title'>{row['song_name']}</div>"
-                    body += f"<div class='subtitle'>was played {row['days_ago']} days ago</div></div>"
+                    body += f"<div class='album-card' style='background-image: url({row[1]});'>" # album_art is row[1]
+                    body += f"<div class='album-content'><div class='title'>{row[0]}</div>" # song_name is row[0]
+                    body += f"<div class='subtitle'>was played {row[3]} days ago</div></div>" # days_ago is row[3]
                 body += "</div>"
             body += "</div>"
         else:
             body += f"<h3>{query['name']}</h3>"
             body += "<p>No data available</p>"
 
+    # Call Gemini AI to generate insights based on the prepared HTML body
     ai_response = json.loads(generate_content(body))
+    # Extract specific parts of the AI's response
     opening_statement = ai_response['opening_statement']
     closing_statement = ai_response['closing_statement']
     weekly_recap = ai_response['weekly_recap']
     mood_recap = ai_response['mood_recap']
     recommendations = ai_response['recommendations']
 
+    # Construct the final HTML string for the email content
     html_string = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -375,30 +402,35 @@ def get_insight():
 
     cursor.close()
     conn.close()
-    send_email(html_string)
+    send_email(html_string) # Send the generated HTML as an email
     return 'Success'
 
 def send_email(html_content):
-    # Email configuration
-    sender_email = "Sender email address"
-    receiver_email = "Receiver email address"
-    password = os.getenv("GOOGLE_APP_PASSWORD")
-    smtp_server = "smtp.gmail.com"
-    smtp_port = 587
+    """
+    Sends an email with the generated HTML content.
+    Email configuration details are loaded from environment variables.
+    """
+    # Email account configuration
+    sender_email = "Sender email address" # Replace with your sender email
+    receiver_email = "Receiver email address" # Replace with your receiver email
+    password = os.getenv("GOOGLE_APP_PASSWORD") # App password for sending email
+    smtp_server = "smtp.gmail.com" # SMTP server for Gmail
+    smtp_port = 587   # Standard TLS port
 
+    # Create a multipart email message
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = "Your Weekly Listening Wrap"
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
+    msg['Subject'] = "Your Weekly Listening Wrap" # Email subject
+    msg['From'] = sender_email # Sender email address
+    msg['To'] = receiver_email # Receiver email address
 
     # Create the HTML part of the message
     html_part = MIMEText(html_content, 'html')
 
-    # Attach HTML content to the email
+    # Attach the HTML content to the email
     msg.attach(html_part)
 
-    # Connect to SMTP server and send email
+    # Connect to the SMTP server and send the email
     with smtplib.SMTP(smtp_server, smtp_port) as server:
-        server.starttls()  # Secure the connection
-        server.login(sender_email, password)
-        server.sendmail(sender_email, receiver_email, msg.as_string())
+        server.starttls()  # Secure the connection with TLS
+        server.login(sender_email, password) # Log in to the email server
+        server.sendmail(sender_email, receiver_email, msg.as_string()) # Send the email
