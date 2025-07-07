@@ -4,7 +4,7 @@ import os
 import secrets
 import time
 import uuid
-from typing import Any, Dict # Import types for type hinting
+from typing import Any, Dict
 
 # Third-Party Library Imports
 from dotenv import load_dotenv
@@ -93,9 +93,16 @@ def load_token_info() -> Dict[str, Any] | None: # Returns dict or None
         return data
     except FileNotFoundError:
         # Return None if the token file does not exist
+        print("ERROR: 'token_info.json' not found. User needs to log in.") # More specific error message
         return None
-    except KeyError:
-        # Return None if the token file exists but is malformed/empty
+    except KeyError as e: # Catch specific KeyError
+        print(f"ERROR: Malformed 'token_info.json' (missing key: {e}). User might need to re-login.") # More specific error message
+        return None
+    except json.JSONDecodeError: # Handle invalid JSON
+        print("ERROR: Invalid JSON format in 'token_info.json'. File might be corrupted. User needs to re-login.")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred loading token info: {e}")
         return None
 
 
@@ -114,7 +121,7 @@ def stream_data() -> Dict[str, Any]: # Returns a dictionary (JSON response)
             return token_info # Return the redirect response directly
     except Exception as e: # Catch generic exceptions during token retrieval or API call
         # Handle cases where user is not logged in or token is invalid
-        print(f'User not logged in / token expired or other error: {e}')
+        print(f'ERROR: Failed to retrieve Spotify token or API call issue: {e}') # More specific error message
         return redirect(url_for('login', _external=True)) # Redirect to login
 
     # Initialize Spotify client with the access token
@@ -122,10 +129,19 @@ def stream_data() -> Dict[str, Any]: # Returns a dictionary (JSON response)
 
     # Get the 'after' timestamp from the request body to fetch new tracks
     req_data = request.get_json()
-    if req_data is None or 'after' not in req_data:
-        return {"status_code": 400, "message": "Missing 'after' parameter in request body"}
+    if req_data is None: # Handle empty request body
+        print("ERROR: Request body is empty or not JSON.")
+        return {"status_code": 400, "message": "Request body must be valid JSON."}
+    if 'after' not in req_data:
+        print("ERROR: Missing 'after' parameter in request body.")
+        return {"status_code": 400, "message": "Missing 'after' parameter in request body."}
 
-    recent_played = sp.current_user_recently_played(after=req_data['after'])
+    try: # Add try-except for Spotify API call
+        recent_played = sp.current_user_recently_played(after=req_data['after'])
+    except Exception as e:
+        print(f"ERROR: Spotify API call failed for recently played tracks: {e}")
+        return {"status_code": 500, "message": "Failed to fetch data from Spotify API."}
+
 
     # If no new items are played, return 204 No Content
     if not recent_played['items']: # Simplified check for empty list
@@ -169,6 +185,7 @@ def insight() -> Dict[str, Any]: # Returns a dictionary (JSON response)
     ai_resp = get_insight()  # Call utility function to generate insights
     if ai_resp != 'Success':
         # Handle internal server errors if insight generation fails
+        print(f"ERROR: Insight generation failed in utils.get_insight. Response: {ai_resp}") # More specific error message
         return {
             "status_code": 500,
             "message": "Internal Server Error"
