@@ -1,78 +1,226 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, BigInteger, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship # Import relationship for foreign key relationships
+# Standard Library Imports
+import json
+import os
+import secrets
+import time
+import uuid
+from typing import Any, Dict
 
-# Base class for declarative models
-Base = declarative_base()
+# Third-Party Library Imports
+from dotenv import load_dotenv
+from flask import Flask, redirect, session, request, url_for
+from spotipy import Spotify, SpotifyOAuth
+import requests # This import is not used in app.py, but kept for consistency if it was in original code. Remove if not needed.
 
-# Define the schema for the dimension and fact tables following Kimball principles (Star Schema)
 
-class DimArtist(Base):
+# Local Application Imports
+from utils import get_insight
+
+
+# Load environment variables from .env file
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+# Get Spotify API credentials from environment variables
+client_id = os.getenv('SPOTIFY_CLIENT_ID')
+client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
+
+# Global variable to store Spotify token info (though session is also used)
+TOKEN_INFO = ''
+
+# Initialize Flask application
+app = Flask(__name__)
+# Set a secret key for session management, crucial for security
+app.secret_key = secrets.token_hex(16)
+
+
+def create_spotify_oauth() -> SpotifyOAuth:
     """
-    Dimension table for Artist data.
-    Stores unique artist information.
+    Creates and returns a SpotifyOAuth object for handling Spotify's OAuth flow.
+    This object manages the authentication process with Spotify.
     """
-    __tablename__ = 'dim_artist'
-    artist_id = Column(String, primary_key=True, comment="Unique Spotify ID for the artist")
-    name = Column(String, nullable=False, comment="Name of the artist")
-    external_url = Column(String, nullable=False, comment="URL to the artist's Spotify page")
-    follower_count = Column(Integer, nullable=False, comment="Total number of followers on Spotify")
-    image_url = Column(String, nullable=False, comment="URL to the artist's image")
-    popularity = Column(Integer, nullable=False, comment="Popularity score of the artist (0-100)")
+    return SpotifyOAuth(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=url_for('redirect_page', _external=True),  # Redirect URI after Spotify login
+        scope='user-read-recently-played'  # Scope defines what data we can access (recently played tracks)
+    )
 
-    # Relationship to FactHistory (optional, for ORM queries)
-    # histories = relationship("FactHistory", back_populates="artist_dim")
 
-class DimAlbum(Base):
+def get_token() -> str: # Returns access token as a string
     """
-    Dimension table for Album data.
-    Stores unique album information.
+    Retrieves the Spotify access token.
+    It loads the token from a file, checks if it's expired, and refreshes it if needed.
+    Redirects to login if no valid token is found.
     """
-    __tablename__ = 'dim_album'
-    album_id = Column(String, primary_key=True, comment="Unique Spotify ID for the album")
-    title = Column(String, nullable=False, comment="Title of the album")
-    total_tracks = Column(Integer, nullable=False, comment="Total number of tracks in the album")
-    release_date=Column(DateTime, nullable=False, comment="Release date of the album")
-    external_url = Column(String, nullable=False, comment="URL to the album's Spotify page")
-    image_url = Column(String, nullable=False, comment="URL to the album's cover art image")
-    label = Column(String, nullable=False, comment="Record label of the album")
-    popularity = Column(Integer, nullable=False, comment="Popularity score of the album (0-100)")
+    token_info = load_token_info()
+    if not token_info:
+        # If no token info is found, redirect user to Spotify login
+        # Note: In a real Flask app, this redirect should be handled by the caller,
+        # or the function should raise an exception. For simplicity, returning redirect here.
+        return redirect(url_for('login', _external=True)) # This return type is a Response object, not str. Consider refactoring caller.
 
-    # Relationship to FactHistory (optional)
-    # histories = relationship("FactHistory", back_populates="album_dim")
+    # Check if the token is expired (less than 10 minutes remaining)
+    is_expired = token_info['expires_at'] - int(time.time()) < 600
+    if is_expired:
+        # If expired, refresh the access token using the refresh token
+        sp_oauth = create_spotify_oauth()
+        token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
+        save_token_info(token_info)  # Save the new token info
+    return token_info['access_token']  # Return the valid access token
 
-class DimSong(Base):
+
+def save_token_info(token_info: Dict[str, Any]) -> None:
     """
-    Dimension table for Song data.
-    Stores unique song (track) information.
+    Saves the Spotify token information (access token, refresh token, expiry) to a local file.
+    This avoids re-authenticating with Spotify every time.
+    Args:
+        token_info (Dict[str, Any]): Dictionary containing Spotify token details.
     """
-    __tablename__ = 'dim_song'
-    song_id = Column(String, primary_key=True, comment="Unique Spotify ID for the song")
-    title = Column(String, nullable=False, comment="Title of the song")
-    disc_number = Column(Integer, nullable=False, comment="Number of the disc the track appears on")
-    duration_ms = Column(BigInteger, nullable=False, comment="Duration of the track in milliseconds")
-    explicit = Column(Boolean, nullable=False, comment="True if the track is explicit, False otherwise")
-    external_url = Column(String, nullable=False, comment="URL to the song's Spotify page")
-    preview_url = Column(String, nullable=False, comment="URL to a 30-second preview (if available)")
-    popularity = Column(Integer, nullable=False, comment="Popularity score of the song (0-100)")
+    with open('token_info.json', 'w') as f:
+        f.write(json.dumps(token_info))
 
-    # Relationship to FactHistory (optional)
-    # histories = relationship("FactHistory", back_populates="song_dim")
 
-class FactHistory(Base):
+def load_token_info() -> Dict[str, Any] | None: # Returns dict or None
     """
-    Fact table for listening history data.
-    Records each instance of a song being played, linking to dimension tables.
-    Follows a star schema design.
+    Loads the Spotify token information from a local file.
+    Handles cases where the file doesn't exist or is empty.
+    Returns:
+        Dict[str, Any] | None: Dictionary containing token info if successful, else None.
     """
-    __tablename__ = 'fact_history'
-    listening_id = Column(Integer, primary_key=True, autoincrement=True, comment="Unique ID for each listening event")
-    played_at = Column(DateTime, nullable=False, comment="Timestamp when the song was played")
-    song_id = Column(String, ForeignKey('dim_song.song_id'), nullable=False, comment="Foreign key to dim_song table")
-    album_id = Column(String, ForeignKey('dim_album.album_id'), nullable=False, comment="Foreign key to dim_album table")
-    artist_id = Column(String, ForeignKey('dim_artist.artist_id'), nullable=False, comment="Foreign key to dim_artist table")
+    try:
+        with open('token_info.json', 'r') as file:
+            data = json.load(file)
+        return data
+    except FileNotFoundError:
+        # Return None if the token file does not exist
+        print("ERROR: 'token_info.json' not found. User needs to log in.") # More specific error message
+        return None
+    except KeyError as e: # Catch specific KeyError
+        print(f"ERROR: Malformed 'token_info.json' (missing key: {e}). User might need to re-login.") # More specific error message
+        return None
+    except json.JSONDecodeError: # Handle invalid JSON
+        print("ERROR: Invalid JSON format in 'token_info.json'. File might be corrupted. User needs to re-login.")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred loading token info: {e}")
+        return None
 
-    # Relationships to dimension tables (optional, for ORM queries)
-    # song_dim = relationship("DimSong", back_populates="histories")
-    # album_dim = relationship("DimAlbum", back_populates="histories")
-    # artist_dim = relationship("DimArtist", back_populates="histories")
+
+@app.route('/', methods=['POST'])
+def stream_data() -> Dict[str, Any]: # Returns a dictionary (JSON response)
+    """
+    API endpoint to stream recently played Spotify tracks.
+    It fetches data from Spotify and returns it as JSON.
+    Requires a POST request with an 'after' timestamp in the body.
+    """
+    try:
+        # Get a valid Spotify access token
+        token_info = get_token()
+        # If get_token returned a redirect response object, handle it
+        if isinstance(token_info, redirect): # Check if it's a redirect response
+            return token_info # Return the redirect response directly
+    except Exception as e: # Catch generic exceptions during token retrieval or API call
+        # Handle cases where user is not logged in or token is invalid
+        print(f'ERROR: Failed to retrieve Spotify token or API call issue: {e}') # More specific error message
+        return redirect(url_for('login', _external=True)) # Redirect to login
+
+    # Initialize Spotify client with the access token
+    sp = Spotify(auth=token_info)
+
+    # Get the 'after' timestamp from the request body to fetch new tracks
+    req_data = request.get_json()
+    if req_data is None: # Handle empty request body
+        print("ERROR: Request body is empty or not JSON.")
+        return {"status_code": 400, "message": "Request body must be valid JSON."}
+    if 'after' not in req_data:
+        print("ERROR: Missing 'after' parameter in request body.")
+        return {"status_code": 400, "message": "Missing 'after' parameter in request body."}
+
+    try: # Add try-except for Spotify API call
+        recent_played = sp.current_user_recently_played(after=req_data['after'])
+    except Exception as e:
+        print(f"ERROR: Spotify API call failed for recently played tracks: {e}")
+        return {"status_code": 500, "message": "Failed to fetch data from Spotify API."}
+
+
+    # If no new items are played, return 204 No Content
+    if not recent_played['items']: # Simplified check for empty list
+        return {
+            "status_code": 204,
+            "message": "No new data"
+        }
+
+    # Process each recently played item to extract relevant data
+    items = []
+    for item in recent_played['items']:
+        # Extract relevant details for each played track
+        played_at = item['played_at'][0],  # Timestamp when the track was played
+        song_id = item['track']['id']  # Spotify ID of the song
+        album_id = item['track']['album']['id']  # Spotify ID of the album
+        artist_id = item['track']['artists'][0]['id']  # Spotify ID of the primary artist
+
+        # Append extracted data to the items list
+        items.append({
+            'id': uuid.uuid4().hex,  # Generate a unique ID for this listening event
+            'played_at': played_at,
+            'song_id': song_id,
+            'album_id': album_id,
+            'artist_id': artist_id,
+        })
+
+    # Return the processed items as a JSON response
+    return {
+        'status_code': 200,
+        'message': f'{len(items)} new songs',
+        'items': items,
+    }
+
+
+@app.route('/insight', methods=['GET'])
+def insight() -> Dict[str, Any]: # Returns a dictionary (JSON response)
+    """
+    API endpoint to trigger the generation and delivery of weekly Spotify insights.
+    Calls the get_insight function from utils.py.
+    """
+    ai_resp = get_insight()  # Call utility function to generate insights
+    if ai_resp != 'Success':
+        # Handle internal server errors if insight generation fails
+        print(f"ERROR: Insight generation failed in utils.get_insight. Response: {ai_resp}") # More specific error message
+        return {
+            "status_code": 500,
+            "message": "Internal Server Error"
+        }
+    # Return success message if insights are generated and sent (e.g., via email)
+    return {
+        "status_code": 200,
+        "message": "Success. Check your email for the insights"
+    }
+
+
+@app.route('/login', methods=['GET'])
+def login() -> Any: # Returns a redirect response object
+    """
+    API endpoint to initiate the Spotify OAuth login process.
+    Redirects the user to Spotify's authorization page.
+    """
+    auth_url = create_spotify_oauth().get_authorize_url()
+    return redirect(auth_url)
+
+
+@app.route('/redirect')
+def redirect_page() -> Any: # Returns a redirect response object
+    """
+    Callback endpoint for Spotify's OAuth flow.
+    After user authorizes, Spotify redirects to this URL with an authorization code.
+    This code is then used to get the access token and refresh token.
+    """
+    session.clear()  # Clear any previous session data
+    code = request.args.get('code')  # Get the authorization code from Spotify's redirect
+
+    # Exchange the authorization code for access and refresh tokens
+    token_info = create_spotify_oauth().get_access_token(code)
+    save_token_info(token_info)  # Save the token info for future use
+    session[TOKEN_INFO] = token_info  # Store token info in Flask session
+
+    # Redirect user to the homepage after successful authentication
+    return redirect(url_for('homepage', _external=True))  # Assuming 'homepage' is defined elsewhere, or use '/'

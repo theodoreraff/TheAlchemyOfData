@@ -164,4 +164,4 @@ services:
       KAFKA_REST_HOST_NAME: rest-proxy
       KAFKA_REST_BOOTSTRAP_SERVERS: 'broker:29092'
       KAFKA_REST_LISTENERS: "http://0.0.0.0:8082"
-      KAFKA_REST_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+      KAFKA_REST_SCHEMA_REGISTRY_URLpip install flask requests spotipy google-generativeai confluent-kafka findspark pyspark psycopg2-binary python-dotenv requests sqlalchemy sqlalchemy.orm : 'http://schema-registry:8081'
