@@ -1,12 +1,20 @@
-import uuid
+# Standard Library Imports
 import json
-from flask import Flask, redirect, session, request, url_for
-from spotipy import Spotify, SpotifyOAuth
 import os
-from dotenv import load_dotenv
 import secrets
 import time
-from utils import get_insight  # Import get_insight function from utils.py
+import uuid
+
+# Third-Party Library Imports
+from dotenv import load_dotenv
+from flask import Flask, redirect, session, request, url_for
+from spotipy import Spotify, SpotifyOAuth
+import requests
+
+
+# Local Application Imports
+from utils import get_insight
+
 
 # Load environment variables from .env file
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -22,7 +30,6 @@ TOKEN_INFO = ''
 app = Flask(__name__)
 # Set a secret key for session management, crucial for security
 app.secret_key = secrets.token_hex(16)
-
 
 def create_spotify_oauth():
     """
