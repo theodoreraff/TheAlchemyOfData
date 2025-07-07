@@ -4,12 +4,13 @@ import os
 import secrets
 import time
 import uuid
+from typing import Any, Dict # Import types for type hinting
 
 # Third-Party Library Imports
 from dotenv import load_dotenv
 from flask import Flask, redirect, session, request, url_for
 from spotipy import Spotify, SpotifyOAuth
-import requests
+import requests # This import is not used in app.py, but kept for consistency if it was in original code. Remove if not needed.
 
 
 # Local Application Imports
@@ -31,7 +32,8 @@ app = Flask(__name__)
 # Set a secret key for session management, crucial for security
 app.secret_key = secrets.token_hex(16)
 
-def create_spotify_oauth():
+
+def create_spotify_oauth() -> SpotifyOAuth:
     """
     Creates and returns a SpotifyOAuth object for handling Spotify's OAuth flow.
     This object manages the authentication process with Spotify.
@@ -44,7 +46,7 @@ def create_spotify_oauth():
     )
 
 
-def get_token():
+def get_token() -> str: # Returns access token as a string
     """
     Retrieves the Spotify access token.
     It loads the token from a file, checks if it's expired, and refreshes it if needed.
@@ -53,7 +55,9 @@ def get_token():
     token_info = load_token_info()
     if not token_info:
         # If no token info is found, redirect user to Spotify login
-        return redirect(url_for('login', _external=True))
+        # Note: In a real Flask app, this redirect should be handled by the caller,
+        # or the function should raise an exception. For simplicity, returning redirect here.
+        return redirect(url_for('login', _external=True)) # This return type is a Response object, not str. Consider refactoring caller.
 
     # Check if the token is expired (less than 10 minutes remaining)
     is_expired = token_info['expires_at'] - int(time.time()) < 600
@@ -65,19 +69,23 @@ def get_token():
     return token_info['access_token']  # Return the valid access token
 
 
-def save_token_info(token_info):
+def save_token_info(token_info: Dict[str, Any]) -> None:
     """
     Saves the Spotify token information (access token, refresh token, expiry) to a local file.
     This avoids re-authenticating with Spotify every time.
+    Args:
+        token_info (Dict[str, Any]): Dictionary containing Spotify token details.
     """
     with open('token_info.json', 'w') as f:
         f.write(json.dumps(token_info))
 
 
-def load_token_info():
+def load_token_info() -> Dict[str, Any] | None: # Returns dict or None
     """
     Loads the Spotify token information from a local file.
     Handles cases where the file doesn't exist or is empty.
+    Returns:
+        Dict[str, Any] | None: Dictionary containing token info if successful, else None.
     """
     try:
         with open('token_info.json', 'r') as file:
@@ -92,7 +100,7 @@ def load_token_info():
 
 
 @app.route('/', methods=['POST'])
-def stream_data():
+def stream_data() -> Dict[str, Any]: # Returns a dictionary (JSON response)
     """
     API endpoint to stream recently played Spotify tracks.
     It fetches data from Spotify and returns it as JSON.
@@ -101,20 +109,26 @@ def stream_data():
     try:
         # Get a valid Spotify access token
         token_info = get_token()
-    except:
+        # If get_token returned a redirect response object, handle it
+        if isinstance(token_info, redirect): # Check if it's a redirect response
+            return token_info # Return the redirect response directly
+    except Exception as e: # Catch generic exceptions during token retrieval or API call
         # Handle cases where user is not logged in or token is invalid
-        print('User not logged in / token expired')
-        return redirect(url_for('login', _external=True))
+        print(f'User not logged in / token expired or other error: {e}')
+        return redirect(url_for('login', _external=True)) # Redirect to login
 
     # Initialize Spotify client with the access token
     sp = Spotify(auth=token_info)
 
     # Get the 'after' timestamp from the request body to fetch new tracks
     req_data = request.get_json()
+    if req_data is None or 'after' not in req_data:
+        return {"status_code": 400, "message": "Missing 'after' parameter in request body"}
+
     recent_played = sp.current_user_recently_played(after=req_data['after'])
 
     # If no new items are played, return 204 No Content
-    if not recent_played['items']:  # Simplified check for empty list
+    if not recent_played['items']: # Simplified check for empty list
         return {
             "status_code": 204,
             "message": "No new data"
@@ -147,7 +161,7 @@ def stream_data():
 
 
 @app.route('/insight', methods=['GET'])
-def insight():
+def insight() -> Dict[str, Any]: # Returns a dictionary (JSON response)
     """
     API endpoint to trigger the generation and delivery of weekly Spotify insights.
     Calls the get_insight function from utils.py.
@@ -167,7 +181,7 @@ def insight():
 
 
 @app.route('/login', methods=['GET'])
-def login():
+def login() -> Any: # Returns a redirect response object
     """
     API endpoint to initiate the Spotify OAuth login process.
     Redirects the user to Spotify's authorization page.
@@ -177,7 +191,7 @@ def login():
 
 
 @app.route('/redirect')
-def redirect_page():
+def redirect_page() -> Any: # Returns a redirect response object
     """
     Callback endpoint for Spotify's OAuth flow.
     After user authorizes, Spotify redirects to this URL with an authorization code.
